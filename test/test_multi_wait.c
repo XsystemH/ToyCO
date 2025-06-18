@@ -30,11 +30,17 @@ int main() {
     struct co *waiter1 = co_start("waiter1", waiter_entry, "A");
     struct co *waiter2 = co_start("waiter2", waiter_entry, "B");
     struct co *waiter3 = co_start("waiter3", waiter_entry, "C");
+    struct co *waiter4 = co_start("waiter4", waiter_entry, "D");
+    struct co *waiter5 = co_start("waiter5", waiter_entry, "E");
+    struct co *waiter6 = co_start("waiter6", waiter_entry, "F");
     
     // 主协程也等待所有协程
     co_wait(waiter1);
     co_wait(waiter2);
     co_wait(waiter3);
+    co_wait(waiter4);
+    co_wait(waiter5);
+    co_wait(waiter6);
     
     printf("所有协程都已完成\n");
     return 0;

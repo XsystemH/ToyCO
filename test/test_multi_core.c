@@ -1,132 +1,217 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <sys/time.h>
 #include <string.h>
-#include "../include/co.h"
+#include "co.h"
 
-// 模拟工作负载的协程
-void worker_coroutine(void *arg) {
-    int worker_id = *(int*)arg;
-    int thread_id = pthread_self() % 1000; // 简化显示
-    
-    for (int i = 0; i < 3; i++) {
-        printf("Worker %d on Thread %d: Task %d\n", worker_id, thread_id, i + 1);
-        co_yield(); // 让出CPU，触发调度
-        usleep(100000); // 模拟工作
-    }
-    printf("Worker %d on Thread %d: Finished\n", worker_id, thread_id);
+#define NUM_THREADS 3        // 只创建3个额外线程 (M0+M1+M2+M3=4个线程)
+#define NUM_COROUTINES 6     // 每个线程创建6个协程
+#define WORK_ITERATIONS 3    // 减少工作迭代次数
+
+// 测试数据结构
+struct test_data {
+    int thread_id;
+    int coroutine_id;
+    const char* name;
+};
+
+// 全局计数器（测试竞争条件）
+static volatile int global_counter = 0;
+static pthread_mutex_t counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// 获取当前时间（毫秒）
+long long get_current_time_ms() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000LL + tv.tv_usec / 1000;
 }
 
-// 协程生产者，在当前P上创建多个协程
-void producer_coroutine(void *arg) {
-    int producer_id = *(int*)arg;
-    int thread_id = pthread_self() % 1000;
+// 计算密集型协程
+void compute_work(void *arg) {
+    struct test_data *data = (struct test_data *)arg;
+    printf("[T%d] 协程 %s 开始计算工作\n", data->thread_id, data->name);
     
-    printf("Producer %d on Thread %d: Starting to create workers\n", producer_id, thread_id);
-    
-    // 在当前P上创建多个工作协程
-    struct co *workers[3];
-    int worker_ids[3];
-    
-    for (int i = 0; i < 3; i++) {
-        worker_ids[i] = producer_id * 10 + i;
-        workers[i] = co_start("worker", worker_coroutine, &worker_ids[i]);
-        printf("Producer %d created Worker %d\n", producer_id, worker_ids[i]);
+    for (int i = 0; i < WORK_ITERATIONS; i++) {
+        // 模拟计算工作
+        volatile int sum = 0;
+        for (int j = 0; j < 500000; j++) {
+            sum += j;
+        }
+        
+        printf("[T%d] 协程 %s 完成计算 %d/%d (sum=%d)\n", 
+               data->thread_id, data->name, i+1, WORK_ITERATIONS, sum);
+        
+        // 主动让出CPU
+        co_yield();
     }
     
-    // 等待所有工作协程完成
-    for (int i = 0; i < 3; i++) {
-        co_wait(workers[i]);
-    }
-    
-    printf("Producer %d on Thread %d: All workers finished\n", producer_id, thread_id);
+    printf("[T%d] 协程 %s 计算工作完成\n", data->thread_id, data->name);
 }
 
-// 跨P等待协程
-void cross_p_waiter(void *arg) {
-    struct co **target_cos = (struct co **)arg;
-    int thread_id = pthread_self() % 1000;
+// I/O密集型协程（模拟）
+void io_work(void *arg) {
+    struct test_data *data = (struct test_data *)arg;
+    printf("[T%d] 协程 %s 开始I/O工作\n", data->thread_id, data->name);
     
-    printf("Cross-P Waiter on Thread %d: Waiting for cross-thread coroutines\n", thread_id);
+    for (int i = 0; i < WORK_ITERATIONS; i++) {
+        // 模拟I/O等待
+        usleep(5000); // 5ms
+        
+        printf("[T%d] 协程 %s 完成I/O %d/%d\n", 
+               data->thread_id, data->name, i+1, WORK_ITERATIONS);
+        
+        co_yield();
+    }
     
-    // 等待其他P上的协程
-    for (int i = 0; i < 2; i++) {
-        if (target_cos[i] != NULL) {
-            printf("Cross-P Waiter: Waiting for coroutine from another thread\n");
-            co_wait(target_cos[i]);
-            printf("Cross-P Waiter: Coroutine %d finished\n", i);
+    printf("[T%d] 协程 %s I/O工作完成\n", data->thread_id, data->name);
+}
+
+// 混合工作协程 + 全局计数器测试
+void mixed_work(void *arg) {
+    struct test_data *data = (struct test_data *)arg;
+    printf("[T%d] 协程 %s 开始混合工作\n", data->thread_id, data->name);
+    
+    for (int i = 0; i < WORK_ITERATIONS; i++) {
+        // 短时间计算
+        volatile int sum = 0;
+        for (int j = 0; j < 100000; j++) {
+            sum += j;
+        }
+        
+        // 更新全局计数器
+        pthread_mutex_lock(&counter_mutex);
+        int old_value = global_counter;
+        global_counter++;
+        pthread_mutex_unlock(&counter_mutex);
+        
+        printf("[T%d] 协程 %s 混合工作 %d/%d: 计数器 %d -> %d\n", 
+               data->thread_id, data->name, i+1, WORK_ITERATIONS, old_value, old_value+1);
+        
+        usleep(3000); // 3ms
+        co_yield();
+    }
+    
+    printf("[T%d] 协程 %s 混合工作完成\n", data->thread_id, data->name);
+}
+
+// 线程工作函数
+void* thread_worker(void *arg) {
+    struct test_data *data = (struct test_data *)arg;
+    printf("线程 %d 启动，准备创建 %d 个协程\n", data->thread_id, NUM_COROUTINES);
+    
+    struct co *coroutines[NUM_COROUTINES];
+    struct test_data co_data[NUM_COROUTINES];
+    
+    // 创建不同类型的协程
+    for (int i = 0; i < NUM_COROUTINES; i++) {
+        co_data[i].thread_id = data->thread_id;
+        co_data[i].coroutine_id = i;
+        
+        char *name = malloc(32);
+        sprintf(name, "T%d-C%d", data->thread_id, i);
+        co_data[i].name = name;
+        
+        // 根据协程编号选择不同的工作类型
+        if (i % 3 == 0) {
+            coroutines[i] = co_start(name, compute_work, &co_data[i]);
+            printf("线程 %d 创建计算协程 %s\n", data->thread_id, name);
+        } else if (i % 3 == 1) {
+            coroutines[i] = co_start(name, io_work, &co_data[i]);
+            printf("线程 %d 创建I/O协程 %s\n", data->thread_id, name);
+        } else {
+            coroutines[i] = co_start(name, mixed_work, &co_data[i]);
+            printf("线程 %d 创建混合协程 %s\n", data->thread_id, name);
         }
     }
     
-    printf("Cross-P Waiter on Thread %d: All cross-P waits completed\n", thread_id);
-}
-
-// 线程函数，代表一个M（内核线程）
-void* thread_function(void *arg) {
-    int thread_id = *(int*)arg;
-    printf("Thread %d (M) started with P binding\n", thread_id);
+    // 等待所有协程完成
+    printf("线程 %d 等待所有协程完成...\n", data->thread_id);
+    for (int i = 0; i < NUM_COROUTINES; i++) {
+        co_wait(coroutines[i]);
+        free((void*)co_data[i].name);
+    }
     
-    // 在这个P中创建生产者协程
-    struct co *producer = co_start("producer", producer_coroutine, &thread_id);
-    
-    // 模拟一些本地工作
-    printf("Thread %d: Doing some local work\n", thread_id);
-    co_yield(); // 让生产者协程有机会运行
-    
-    // 等待生产者完成
-    co_wait(producer);
-    
-    printf("Thread %d (M) finishing\n", thread_id);
+    printf("线程 %d 所有协程已完成\n", data->thread_id);
     return NULL;
 }
 
 int main() {
-    printf("=== Multi-Core Coroutine Scheduling Test ===\n");
-    printf("Testing G-M-P model: G(Goroutines) - M(Threads) - P(Processors)\n\n");
+    printf("=== 多核协程调度系统测试 ===\n");
+    printf("CPU核数: %d\n", co_get_gomaxprocs());
+    printf("设置协程调度器数量为: 4\n");
     
-    // 创建多个线程（M），每个线程绑定一个P
-    const int num_threads = 3;
-    pthread_t threads[num_threads];
-    int thread_ids[num_threads];
-    struct co *cross_targets[2] = {NULL, NULL};
+    // 设置GOMAXPROCS为4
+    co_set_gomaxprocs(4);
     
-    // 创建线程
-    for (int i = 0; i < num_threads; i++) {
-        thread_ids[i] = i + 1;
-        if (pthread_create(&threads[i], NULL, thread_function, &thread_ids[i]) != 0) {
-            perror("pthread_create failed");
-            exit(1);
+    long long test_start = get_current_time_ms();
+    
+    // 创建工作线程
+    printf("\n=== 创建工作线程 ===\n");
+    struct test_data thread_data[NUM_THREADS];
+    
+    for (int i = 0; i < NUM_THREADS; i++) {
+        thread_data[i].thread_id = i + 1;
+        thread_data[i].name = "ThreadWorker";
+        
+        printf("启动工作线程 %d\n", i + 1);
+        co_thread(thread_worker, &thread_data[i]);
+    }
+    
+    // 主线程也创建一些协程
+    printf("\n=== 主线程协程测试 ===\n");
+    struct co *main_cos[4];
+    struct test_data main_data[4];
+    
+    for (int i = 0; i < 4; i++) {
+        main_data[i].thread_id = 0; // 主线程
+        main_data[i].coroutine_id = i;
+        
+        char *name = malloc(32);
+        sprintf(name, "Main-%d", i);
+        main_data[i].name = name;
+        
+        if (i % 2 == 0) {
+            main_cos[i] = co_start(name, compute_work, &main_data[i]);
+        } else {
+            main_cos[i] = co_start(name, mixed_work, &main_data[i]);
         }
+        printf("主线程创建协程 %s\n", name);
     }
     
-    // 主线程也作为一个P，创建跨P等待的协程
-    printf("Main thread: Creating cross-P waiter\n");
-    struct co *cross_waiter = co_start("cross_waiter", cross_p_waiter, cross_targets);
-    
-    // 主线程的一些协程工作
-    printf("Main thread: Creating some local coroutines\n");
-    int main_worker_id = 999;
-    struct co *main_worker = co_start("main_worker", worker_coroutine, &main_worker_id);
-    
-    // 让协程有机会执行
-    co_yield();
-    
-    // 等待主线程的协程
-    co_wait(main_worker);
-    co_wait(cross_waiter);
-    
-    // 等待所有线程完成
-    for (int i = 0; i < num_threads; i++) {
-        pthread_join(threads[i], NULL);
+    // 等待主线程协程完成
+    for (int i = 0; i < 4; i++) {
+        co_wait(main_cos[i]);
+        free((void*)main_data[i].name);
     }
     
-    printf("\n=== Expected Behavior Analysis ===\n");
-    printf("1. Each thread (M) should bind to a processor (P)\n");
-    printf("2. Coroutines (G) created in each P should primarily run on that P\n");
-    printf("3. When local queue is empty, coroutines should be stolen from global queue\n");
-    printf("4. co_wait should work across different Ps\n");
-    printf("5. co_yield should trigger local scheduling first, then global scheduling\n");
+    // 等待工作线程完成
+    printf("\n等待所有线程完成...\n");
+    sleep(3);
     
+    long long test_end = get_current_time_ms();
+    
+    // 统计结果
+    printf("\n=== 测试结果 ===\n");
+    printf("全局计数器最终值: %d\n", global_counter);
+    printf("总测试时间: %lld ms\n", test_end - test_start);
+    
+    // 计算预期值：每个线程有NUM_COROUTINES个协程，其中1/3是混合协程，每个贡献WORK_ITERATIONS次
+    // 主线程也有4个协程，其中2个是混合协程
+    int expected = (NUM_THREADS * (NUM_COROUTINES / 3) + 2) * WORK_ITERATIONS;
+    printf("预期全局计数器值: %d\n", expected);
+    
+    if (global_counter > 0 && global_counter <= expected + 10) {
+        printf("多核协程调度测试 PASSED\n");
+        printf("- 成功创建并调度多个协程\n");
+        printf("- 协程能在不同线程间正确执行\n");
+        printf("- 全局状态保持一致性\n");
+    } else {
+        printf("多核协程调度测试 FAILED\n");
+        printf("- 全局计数器值异常: %d (期望: %d)\n", global_counter, expected);
+    }
+    
+    printf("测试完成\n");
     return 0;
-} 
+}

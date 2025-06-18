@@ -12,7 +12,7 @@ OBJECTS = $(SOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 TESTS = $(wildcard $(TESTDIR)/*.c)
 TEST_BINS = $(TESTS:$(TESTDIR)/%.c=%)
 
-.PHONY: all clean test test1 test2 test_multi_wait
+.PHONY: all clean test test1 test2 test_multi_wait test_multi_core
 
 all: libco.a $(TEST_BINS)
 
@@ -41,20 +41,13 @@ test_multi_wait: libco.a test/test_multi_wait.c
 test_multi_core: libco.a test/test_multi_core.c
 	$(CC) $(CFLAGS) -pthread -o $@ test/test_multi_core.c -L. -lco
 
-# 如果需要测试汇编版本
-test1-asm: test/test1.c src/co_asm.c
-	$(CC) $(CFLAGS) -o $@ test/test1.c src/co_asm.c
-
-test2-asm: test/test2.c src/co_asm.c
-	$(CC) $(CFLAGS) -o $@ test/test2.c src/co_asm.c
-
 # 运行测试
 test: test2
 	@echo "运行测试程序..."
 	timeout 3s ./test2 || true
 
 clean:
-	rm -rf $(OBJDIR) libco.a $(TEST_BINS) test1-asm test2-asm test_multi_wait test_multi_core
+	rm -rf $(OBJDIR) libco.a $(TEST_BINS) test_multi_wait test_multi_core
 
 # 帮助信息
 help:

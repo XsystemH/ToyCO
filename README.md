@@ -74,6 +74,26 @@ int main() {
 }
 ```
 
+## Multi-core
+
+对多个线程的协程调度
+
+co_yeild co_wait co_start 应为基本原语 类似于goroutine的实现
+
+![alt text](imgs/multi-core.jpg)
+
+### G-M-P
+
+内核线程M会运行一个pthread: P, 在P中使用co_start创建协程G, G会被存储在P和全局的两个队列中。
+
+co_wait可以跨越P进行等待其他P上的G。
+
+为了性能，每个 M（pthread）会绑定一个 P，当前执行 G 在 co_yeild 时会先从绑定的 P 中的本地队列中找下一个调度的 G，如果本地队列不足，则从全局队列中找下一个调度的 G。该G会被移动到执行其的P的本地队列中。
+
+## Example
+
+
+
 ## Implementation
 
 Language: C
@@ -93,5 +113,3 @@ struct co {
   char *stack;          // 协程栈
 }
 ```
-
-### 

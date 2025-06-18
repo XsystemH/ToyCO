@@ -41,13 +41,16 @@ test_multi_wait: libco.a test/test_multi_wait.c
 test_multi_core: libco.a test/test_multi_core.c
 	$(CC) $(CFLAGS) -pthread -o $@ test/test_multi_core.c -L. -lco
 
+test_public: libco.a test/test_public.c
+	$(CC) $(CFLAGS) -pthread -o $@ test/test_public.c -L. -lco
+
 # 运行测试
 test: test2
 	@echo "运行测试程序..."
 	timeout 3s ./test2 || true
 
 clean:
-	rm -rf $(OBJDIR) libco.a $(TEST_BINS) test_multi_wait test_multi_core
+	rm -rf $(OBJDIR) libco.a $(TEST_BINS) test_multi_wait test_multi_core test_public
 
 # 帮助信息
 help:

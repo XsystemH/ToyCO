@@ -12,7 +12,7 @@
 #include <sys/sysinfo.h>
 
 // Debug输出宏定义
-#define DEBUG_PRINT(fmt, ...) printf("\033[33m[TID:%ld][debug] " fmt "\033[0m\n", pthread_self(), ##__VA_ARGS__)
+#define DEBUG_PRINT(fmt, ...) // printf("\033[33m[TID:%ld][debug] " fmt "\033[0m\n", pthread_self(), ##__VA_ARGS__)
 
 #define STACK_SIZE (1 << 16)  // 栈 64KB
 #define MAX_LOCAL_QUEUE 4   // 本地队列最大大小
@@ -93,8 +93,91 @@ static void local_queue_push(struct processor *p, struct co *g);
 // static struct co* steal_work(struct processor *p); TODO
 static void schedule();
 static void co_wrapper();
-static void* machine_loop(void *arg);
 static void wake_processor();
+
+// 线程初始化数据结构
+struct thread_init_data {
+  struct machine *m;
+  void *(*start_routine)(void *);
+  void *arg;
+};
+
+// 线程初始化包装函数
+static void* thread_init_wrapper(void *arg) {
+  struct thread_init_data *init_data = (struct thread_init_data *)arg;
+  struct machine *m = init_data->m;
+  void *(*start_routine)(void *) = init_data->start_routine;
+  void *routine_arg = init_data->arg;
+  
+  // 设置线程局部变量
+  current_m = m;
+  current_p = m->p;
+  
+  DEBUG_PRINT("机器线程启动, 处理器ID=%d", m->p->id);
+  
+  // 如果有start_routine，在新线程中创建协程来执行它
+  if (start_routine) {
+    char thread_name[64];
+    snprintf(thread_name, sizeof(thread_name), "thread-worker-%d", m->p->id);
+    
+    DEBUG_PRINT("在线程中创建协程执行start_routine: %s", thread_name);
+    
+    // 创建协程来执行start_routine
+    struct co *worker_co = malloc(sizeof(struct co));
+    assert(worker_co != NULL);
+    
+    worker_co->name = strdup(thread_name);
+    worker_co->func = (void (*)(void *))start_routine;
+    worker_co->arg = routine_arg;
+    worker_co->status = CO_NEW;
+    list_init(&worker_co->waiters);
+    worker_co->next = NULL;
+    
+    worker_co->stack = (uint8_t *)malloc(STACK_SIZE);
+    assert(worker_co->stack != NULL);
+    
+    // 初始化ucontext
+    getcontext(&worker_co->context);
+    worker_co->context.uc_stack.ss_sp = worker_co->stack;
+    worker_co->context.uc_stack.ss_size = STACK_SIZE;
+    worker_co->context.uc_link = NULL;
+    makecontext(&worker_co->context, co_wrapper, 0);
+    
+    // 将协程放入本地队列
+    local_queue_push(m->p, worker_co);
+    m->spinning = 0;  // 有工作了，不需要自旋
+  }
+  
+  // 清理初始化数据
+  free(init_data);
+  
+  // 进入machine_loop调度循环
+  while (1) {
+    if (m->spinning) {
+      struct co *g = global_queue_pop();
+      // if (!g) {
+      //   g = steal_work(m->p);
+      // } TODO
+            
+      if (g) {
+        m->spinning = 0;
+        m->p->current_g = g;
+        if (g->status == CO_NEW) {
+          g->status = CO_RUNNING;
+        }
+        DEBUG_PRINT("机器获得协程 %s", g->name);
+        setcontext(&g->context);
+      } else {
+        // 短暂休眠避免过度自旋
+        usleep(1000); // 1ms
+      }
+    } else {
+      schedule();
+    }
+  }
+  
+  return NULL;
+}
 
 // 初始化运行
 __attribute__((constructor))
@@ -227,9 +310,6 @@ void co_wait(struct co *co) {
 
 // 创建线程
 int co_thread(void *(*start_routine)(void *), void *arg) {
-  (void)start_routine; // 未使用的参数，将来可能用于自定义线程函数
-  (void)arg;           // 未使用的参数，将来可能用于线程参数
-    
   if (runtime.num_machines >= runtime.gomaxprocs) {
     DEBUG_PRINT("已达到最大线程数 %d", runtime.gomaxprocs);
     return -1;
@@ -250,20 +330,34 @@ int co_thread(void *(*start_routine)(void *), void *arg) {
   // 初始化机器
   m->p = p;
   m->g0 = &p->g0;
-  m->spinning = 1;
+  m->spinning = 1;  // 默认自旋状态
     
   runtime.processors[runtime.num_processors++] = p;
   runtime.machines[runtime.num_machines++] = m;
+
+  // 准备线程初始化数据
+  struct thread_init_data *init_data = malloc(sizeof(struct thread_init_data));
+  assert(init_data != NULL);
+  init_data->m = m;
+  init_data->start_routine = start_routine;
+  init_data->arg = arg;
 
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     
-  int ret = pthread_create(&m->thread, &attr, machine_loop, m);
+  int ret = pthread_create(&m->thread, &attr, thread_init_wrapper, init_data);
   pthread_attr_destroy(&attr);
     
   if (ret == 0) {
     DEBUG_PRINT("创建新线程成功, 处理器ID=%d", p->id);
+  } else {
+    // 创建失败，清理资源
+    free(init_data);
+    free(m);
+    free(p);
+    runtime.num_processors--;
+    runtime.num_machines--;
   }
     
   return ret;
@@ -284,19 +378,44 @@ int co_get_gomaxprocs() {
 
 // ========== 内部调度函数 ==========
 
-// 从全局队列弹出协程
+// 从全局队列随机弹出协程
 static struct co* global_queue_pop() {
   pthread_mutex_lock(&runtime.global_mutex);
     
-  struct co *g = runtime.global_queue_head;
-  if (g) {
+  if (runtime.global_queue_size == 0) {
+    pthread_mutex_unlock(&runtime.global_mutex);
+    return NULL;
+  }
+  
+  // 随机选择一个位置
+  int random_pos = rand() % runtime.global_queue_size;
+  struct co *g = NULL;
+  
+  if (random_pos == 0) {
+    // 选择头部节点
+    g = runtime.global_queue_head;
     runtime.global_queue_head = g->next;
     if (runtime.global_queue_head == NULL) {
       runtime.global_queue_tail = NULL;
     }
-    runtime.global_queue_size--;
-    g->next = NULL;
+  } else {
+    // 找到要删除节点的前一个节点
+    struct co *prev = runtime.global_queue_head;
+    for (int i = 0; i < random_pos - 1; i++) {
+      prev = prev->next;
+    }
+    
+    g = prev->next;
+    prev->next = g->next;
+    
+    // 如果删除的是尾节点，需要更新tail指针
+    if (g == runtime.global_queue_tail) {
+      runtime.global_queue_tail = prev;
+    }
   }
+  
+  runtime.global_queue_size--;
+  g->next = NULL;
     
   pthread_mutex_unlock(&runtime.global_mutex);
   return g;
@@ -318,12 +437,25 @@ static void global_queue_push(struct co *g) {
   pthread_mutex_unlock(&runtime.global_mutex);
 }
 
-// 从本地队列弹出协程
+// 从本地队列随机弹出协程
 static struct co* local_queue_pop(struct processor *p) {
   if (p->local_size == 0) return NULL;
     
-  struct co *g = p->local_queue[p->local_head];
-  p->local_head = (p->local_head + 1) % MAX_LOCAL_QUEUE;
+  // 随机选择一个位置
+  int random_offset = rand() % p->local_size;
+  int random_index = (p->local_head + random_offset) % MAX_LOCAL_QUEUE;
+  
+  struct co *g = p->local_queue[random_index];
+  
+  // 将被选中位置后的所有元素向前移动一位
+  for (int i = 0; i < p->local_size - random_offset - 1; i++) {
+    int src_index = (random_index + 1 + i) % MAX_LOCAL_QUEUE;
+    int dst_index = (random_index + i) % MAX_LOCAL_QUEUE;
+    p->local_queue[dst_index] = p->local_queue[src_index];
+  }
+  
+  // 更新队列尾部指针和大小
+  p->local_tail = (p->local_tail - 1 + MAX_LOCAL_QUEUE) % MAX_LOCAL_QUEUE;
   p->local_size--;
     
   return g;
@@ -421,39 +553,6 @@ static void co_wrapper() {
   schedule();
 }
 
-static void* machine_loop(void *arg) {
-  struct machine *m = (struct machine *)arg;
-  current_m = m;
-  current_p = m->p;
-    
-  DEBUG_PRINT("机器线程启动，处理器ID=%d", m->p->id);
-    
-  while (1) {
-    if (m->spinning) {
-      struct co *g = global_queue_pop();
-      // if (!g) {
-      //   g = steal_work(m->p);
-      // } TODO
-            
-      if (g) {
-        m->spinning = 0;
-        m->p->current_g = g;
-      if (g->status == CO_NEW) {
-        g->status = CO_RUNNING;
-      }
-      DEBUG_PRINT("机器获得协程 %s", g->name);
-        setcontext(&g->context);
-      } else {
-        // 短暂休眠避免过度自旋
-        usleep(1000); // 1ms
-      }
-    } else {
-      schedule();
-    }
-  }
-    
-  return NULL;
-}
 
 // 唤醒空闲处理器
 static void wake_processor() {

@@ -241,3 +241,49 @@ static void co_wrapper() {
   DEBUG_PRINT("从已结束协程 %s 切换到协程 %s", current->name, co_current->name);
   setcontext(&co_current->context);
 }
+
+// ========== 内存管理函数 ==========
+
+static void co_free(struct co *co) {
+  if (co != NULL && co != &main_co) {  // 不释放main_co，因为它不是malloc分配的
+    DEBUG_PRINT("释放协程 %s 的内存", co->name);
+    if (co->name) {
+      free(co->name);
+    }
+    if (co->stack) {
+      free(co->stack);
+    }
+    free(co);
+  }
+}
+
+static void co_list_cleanup(struct co_list *list) {
+  struct co_node *node = list->head;
+  while (node != NULL) {
+    struct co_node *next = node->next;
+    co_free(node->co);
+    free(node);
+    node = next;
+  }
+  list->head = NULL;
+  list->size = 0;
+}
+
+// 程序退出时自动执行内存清理
+__attribute__((destructor))
+static void co_cleanup() {
+  DEBUG_PRINT("开始清理协程系统内存");
+  
+  // 清理所有列表中的协程
+  co_list_cleanup(&co_run_list);
+  co_list_cleanup(&co_wait_list);
+  co_list_cleanup(&co_dead_list);
+  
+  // 释放main_co的名称内存（因为是strdup分配的）
+  if (main_co.name) {
+    free(main_co.name);
+    main_co.name = NULL;
+  }
+  
+  DEBUG_PRINT("协程系统内存清理完成");
+}

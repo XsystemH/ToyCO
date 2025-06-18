@@ -1,4 +1,5 @@
 #include "co.h"
+#include "list.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -28,7 +29,7 @@ struct co {
     void *arg;            // 协程函数参数
     
     co_status_t status;   // 协程状态
-    struct co *waiter;    // 等待的协程
+    struct list waiters;  // 等待这个协程的协程列表
     ucontext_t context;   // 使用ucontext替代jmp_buf
     uint8_t *stack;       // 协程栈
 };
@@ -65,7 +66,7 @@ static void co_init() {
     main_co.func = NULL;
     main_co.arg = NULL;
     main_co.status = CO_RUNNING;
-    main_co.waiter = NULL;
+    list_init(&main_co.waiters);
     main_co.stack = NULL;
 
     co_current = &main_co;
@@ -91,7 +92,7 @@ struct co* co_start(const char *name, void (*func)(void *), void *arg) {
   new_co->func = func;
   new_co->arg = arg;
   new_co->status = CO_NEW;
-  new_co->waiter = NULL;
+  list_init(&new_co->waiters);
 
   new_co->stack = (uint8_t *)malloc(STACK_SIZE);
   assert(new_co->stack != NULL);
@@ -136,11 +137,11 @@ void co_wait(struct co *co) {
 
   DEBUG_PRINT("协程 %s 状态变更: CO_RUNNING -> CO_WAITING", co_current->name);
   co_current->status = CO_WAITING;
-  co->waiter = co_current;
+  list_add(&co->waiters, co_current);
 
   co_add_to_list(&co_wait_list, co_current);
   co_remove_from_list(&co_run_list, co_current);
-  DEBUG_PRINT("协程 %s 移至等待列表", co_current->name);
+  DEBUG_PRINT("协程 %s 移至等待列表，等待协程 %s", co_current->name, co->name);
 
   co_yield();
 }
@@ -223,12 +224,14 @@ static void co_wrapper() {
   co_remove_from_list(&co_run_list, current);
   co_add_to_list(&co_dead_list, current);
   
-  if (current->waiter) {
-    DEBUG_PRINT("协程 %s 结束，唤醒等待者 %s", current->name, current->waiter->name);
-    current->waiter->status = CO_RUNNING;
-    co_add_to_list(&co_run_list, current->waiter);
-    co_remove_from_list(&co_wait_list, current->waiter);
-    DEBUG_PRINT("等待者 %s 状态变更: CO_WAITING -> CO_RUNNING", current->waiter->name);
+  // 唤醒所有等待这个协程的协程
+  while (!list_empty(&current->waiters)) {
+    struct co *waiter = (struct co *)list_pop_front(&current->waiters);
+    DEBUG_PRINT("协程 %s 结束，唤醒等待者 %s", current->name, waiter->name);
+    waiter->status = CO_RUNNING;
+    co_add_to_list(&co_run_list, waiter);
+    co_remove_from_list(&co_wait_list, waiter);
+    DEBUG_PRINT("等待者 %s 状态变更: CO_WAITING -> CO_RUNNING", waiter->name);
   }
   
   DEBUG_PRINT("协程 %s 准备退出，调用 co_schedule", current->name);

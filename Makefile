@@ -12,7 +12,7 @@ OBJECTS = $(SOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 TESTS = $(wildcard $(TESTDIR)/*.c)
 TEST_BINS = $(TESTS:$(TESTDIR)/%.c=%)
 
-.PHONY: all clean test test1 test2
+.PHONY: all clean test test1 test2 test_multi_wait
 
 all: libco.a $(TEST_BINS)
 
@@ -35,6 +35,9 @@ test1: libco.a test/test1.c
 test2: libco.a test/test2.c
 	$(CC) $(CFLAGS) -o $@ test/test2.c -L. -lco
 
+test_multi_wait: libco.a test/test_multi_wait.c
+	$(CC) $(CFLAGS) -o $@ test/test_multi_wait.c -L. -lco
+
 # 如果需要测试汇编版本
 test1-asm: test/test1.c src/co_asm.c
 	$(CC) $(CFLAGS) -o $@ test/test1.c src/co_asm.c
@@ -48,14 +51,15 @@ test: test2
 	timeout 3s ./test2 || true
 
 clean:
-	rm -rf $(OBJDIR) libco.a $(TEST_BINS) test1-asm test2-asm
+	rm -rf $(OBJDIR) libco.a $(TEST_BINS) test1-asm test2-asm test_multi_wait
 
 # 帮助信息
 help:
 	@echo "可用目标："
-	@echo "  all      - 编译所有文件"
-	@echo "  test1    - 编译测试1（无限循环版本）"
-	@echo "  test2    - 编译测试2（有限循环版本）"
-	@echo "  test     - 运行测试2"
-	@echo "  clean    - 清理编译文件"
-	@echo "  help     - 显示此帮助信息" 
+	@echo "  all              - 编译所有文件"
+	@echo "  test1            - 编译测试1（无限循环版本）"
+	@echo "  test2            - 编译测试2（有限循环版本）"
+	@echo "  test_multi_wait  - 编译多协程等待测试"
+	@echo "  test             - 运行测试2"
+	@echo "  clean            - 清理编译文件"
+	@echo "  help             - 显示此帮助信息" 

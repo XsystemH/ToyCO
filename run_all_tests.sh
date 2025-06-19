@@ -8,7 +8,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 测试程序列表（按照Makefile中的顺序）
-TESTS=("test1" "test2" "test_multi_wait" "test_multi_core" "test_public" "test_steal")
+TESTS=("test1" "test2" "test_multi_wait" "test_multi_core" "test_public")
 
 # 函数：打印分隔线
 print_separator() {

@@ -75,6 +75,11 @@ static struct {
   int num_processors;
   int num_machines;
     
+  struct co *dead_queue_head;
+  struct co *dead_queue_tail;
+  int dead_queue_size;
+  pthread_mutex_t dead_mutex;
+    
   int gomaxprocs;
   int initialized;
 } runtime;
@@ -97,6 +102,8 @@ static void move_public_to_private(struct processor *p);
 static struct co* steal_work(struct processor *p);
 static void schedule();
 static void co_wrapper();
+static void dead_queue_push(struct co *g);
+static void cleanup_dead_coroutines();
 
 struct thread_init_data {
   struct machine *m;
@@ -174,6 +181,11 @@ static void runtime_init() {
   runtime.num_machines = 0;
   runtime.gomaxprocs = get_nprocs(); // 默认为可用的CPU核数
   runtime.initialized = 1;
+    
+  runtime.dead_queue_head = NULL;
+  runtime.dead_queue_tail = NULL;
+  runtime.dead_queue_size = 0;
+  pthread_mutex_init(&runtime.dead_mutex, NULL);
     
   main_co.name = strdup("main");
   main_co.func = NULL;
@@ -578,23 +590,74 @@ static void co_wrapper() {
   
   while (!list_empty(&current->waiters)) {
     struct co *waiter = (struct co *)list_pop_front(&current->waiters);
-    DEBUG_PRINT("唤醒等待者 %s", waiter->name);
+    DEBUG_PRINT("唤醒Waiter %s", waiter->name);
     waiter->status = CO_RUNNING;
 
     public_queue_push(current_p, waiter);
   }
-    
+  
+  dead_queue_push(current);
+  
   current_p->current_g = NULL;
   schedule();
+}
+
+static void dead_queue_push(struct co *g) {
+  pthread_mutex_lock(&runtime.dead_mutex);
+  
+  g->next = NULL;
+  if (runtime.dead_queue_tail) {
+    runtime.dead_queue_tail->next = g;
+  } else {
+    runtime.dead_queue_head = g;
+  }
+  runtime.dead_queue_tail = g;
+  runtime.dead_queue_size++;
+  
+  pthread_mutex_unlock(&runtime.dead_mutex);
+
+  DEBUG_PRINT("协程 %s 添加到DEAD队列", g->name);
+}
+
+static void cleanup_dead_coroutines() {
+  pthread_mutex_lock(&runtime.dead_mutex);
+  
+  struct co *current = runtime.dead_queue_head;
+  while (current) {
+    struct co *next = current->next;
+    DEBUG_PRINT("清理DEAD协程 %s", current->name);
+    if (current->name) {
+      free(current->name);
+      current->name = NULL;
+    }
+    if (current->stack) {
+      free(current->stack);
+      current->stack = NULL;
+    }
+    while (!list_empty(&current->waiters)) {
+      list_pop_front(&current->waiters);
+    }
+    free(current);
+    current = next;
+  }
+  
+  runtime.dead_queue_head = NULL;
+  runtime.dead_queue_tail = NULL;
+  runtime.dead_queue_size = 0;
+  
+  pthread_mutex_unlock(&runtime.dead_mutex);
 }
 
 __attribute__((destructor))
 static void co_cleanup() {
   if (!runtime.initialized) return;
     
-  DEBUG_PRINT("清理多核协程运行时");
+  DEBUG_PRINT("清理多核协程Runtime");
     
   pthread_mutex_destroy(&runtime.global_mutex);
+  
+  cleanup_dead_coroutines();
+  pthread_mutex_destroy(&runtime.dead_mutex);
     
   for (int i = 1; i < runtime.num_processors; i++) {
     if (runtime.processors[i] != &main_processor) {
@@ -616,5 +679,5 @@ static void co_cleanup() {
     main_co.name = NULL;
   }
     
-  DEBUG_PRINT("多核协程运行时清理完成");
+  DEBUG_PRINT("多核协程Runtime清理完成");
 }

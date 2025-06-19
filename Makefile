@@ -12,7 +12,7 @@ OBJECTS = $(SOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 TESTS = $(wildcard $(TESTDIR)/*.c)
 TEST_BINS = $(TESTS:$(TESTDIR)/%.c=%)
 
-.PHONY: all clean test test1 test2 test_multi_wait test_multi_core
+.PHONY: all clean test test1 test2 test_multi_wait test_multi_core test_steal
 
 all: libco.a $(TEST_BINS)
 
@@ -44,13 +44,16 @@ test_multi_core: libco.a test/test_multi_core.c
 test_public: libco.a test/test_public.c
 	$(CC) $(CFLAGS) -pthread -o $@ test/test_public.c -L. -lco
 
+test_steal: libco.a test/test_steal.c
+	$(CC) $(CFLAGS) -pthread -o $@ test/test_steal.c -L. -lco
+
 # 运行测试
 test: test2
 	@echo "运行测试程序..."
 	timeout 3s ./test2 || true
 
 clean:
-	rm -rf $(OBJDIR) libco.a $(TEST_BINS) test_multi_wait test_multi_core test_public
+	rm -rf $(OBJDIR) libco.a $(TEST_BINS) test_multi_wait test_multi_core test_public test_steal
 
 # 帮助信息
 help:

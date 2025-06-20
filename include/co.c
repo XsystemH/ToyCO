@@ -170,7 +170,7 @@ __attribute__((constructor))
 static void runtime_init() {
   if (runtime.initialized) return;
     
-  DEBUG_PRINT("初始化多核协程运行中...");
+  DEBUG_PRINT("初始化多核协程Runtime...");
     
   runtime.global_queue_head = NULL;
   runtime.global_queue_tail = NULL;
@@ -219,7 +219,7 @@ static void runtime_init() {
   runtime.num_machines = 1;
     
   srand(time(NULL));
-  DEBUG_PRINT("多核协程运行时初始化完成, GOMAXPROCS=%d", runtime.gomaxprocs);
+  DEBUG_PRINT("多核协程Runtime初始化完成, GOMAXPROCS=%d", runtime.gomaxprocs);
 }
 
 struct co* co_start(const char *name, void (*func)(void *), void *arg) {
@@ -595,6 +595,9 @@ static void co_wrapper() {
 
     public_queue_push(current_p, waiter);
   }
+  
+  free(current->stack);
+  current->stack = NULL;
   
   dead_queue_push(current);
   

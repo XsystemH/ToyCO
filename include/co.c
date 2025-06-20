@@ -653,6 +653,18 @@ static void co_cleanup() {
   if (!runtime.initialized) return;
     
   DEBUG_PRINT("清理多核协程Runtime");
+
+  // 关闭所有处理器的线程
+  for (int i = 0; i < runtime.num_machines; i++) {
+    struct machine *m = runtime.machines[i];
+    if (m && m != &main_machine) {
+      DEBUG_PRINT("等待处理器 %d 线程结束", m->p->id);
+      pthread_cancel(m->thread);
+      pthread_join(m->thread, NULL);
+      DEBUG_PRINT("处理器 %d 线程已结束", m->p->id);
+      free(m);
+    }
+  }
     
   pthread_mutex_destroy(&runtime.global_mutex);
   
@@ -661,23 +673,46 @@ static void co_cleanup() {
     
   for (int i = 1; i < runtime.num_processors; i++) {
     if (runtime.processors[i] != &main_processor) {
+      // 清理每个处理器的public队列
+      pthread_mutex_lock(&runtime.processors[i]->public_mutex);
+      while (runtime.processors[i]->public_size > 0) {
+        struct co *g = runtime.processors[i]->public_queue[runtime.processors[i]->public_head];
+        runtime.processors[i]->public_head = (runtime.processors[i]->public_head + 1) % MAX_LOCAL_QUEUE;
+        runtime.processors[i]->public_size--;
+        if (g->name) {
+          free(g->name);
+          g->name = NULL;
+        }
+        if (g->stack) {
+          free(g->stack);
+          g->stack = NULL;
+        }
+        list_clear(&g->waiters);
+        free(g);
+      }
+      pthread_mutex_unlock(&runtime.processors[i]->public_mutex);
       pthread_mutex_destroy(&runtime.processors[i]->public_mutex);
+      // 清理每个处理器的private队列
+      for (int j = 0; j < MAX_LOCAL_QUEUE; j++) {
+        struct co *g = runtime.processors[i]->private_queue[j];
+        if (g) {
+          if (g->name) {
+            free(g->name);
+            g->name = NULL;
+          }
+          if (g->stack) {
+            free(g->stack);
+            g->stack = NULL;
+          }
+          list_clear(&g->waiters);
+          free(g);
+        }
+      }
       free(runtime.processors[i]);
     }
   }
     
   pthread_mutex_destroy(&main_processor.public_mutex);
-    
-  for (int i = 1; i < runtime.num_machines; i++) {
-    if (runtime.machines[i] != &main_machine) {
-      free(runtime.machines[i]);
-    }
-  }
-    
-  if (main_co.name) {
-    free(main_co.name);
-    main_co.name = NULL;
-  }
     
   DEBUG_PRINT("多核协程Runtime清理完成");
 }

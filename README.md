@@ -164,3 +164,9 @@ struct co {
   char *stack;          // 协程栈
 }
 ```
+
+## TEST
+
+```
+bash run_all_tests.sh
+```
